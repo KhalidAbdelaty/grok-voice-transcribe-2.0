@@ -31,6 +31,22 @@ import numpy as np
 SAMPLE_RATE = 16000
 BLOCK_S = 0.02
 
+# Every LocalAudio with open streams. Exclusive capture locks the mic: while
+# one is open, any other open of that mic fails with "Device unavailable
+# [PaErrorCode -9985]". A call left behind by a reloaded tab keeps its
+# streams until the engine notices (30 s), so a new call releases it first.
+_active: set["LocalAudio"] = set()
+_active_lock = threading.Lock()
+
+
+def _explain(exc: Exception) -> str:
+    text = str(exc)
+    if "-9985" in text or "Device unavailable" in text:
+        return (f"the microphone is in use by another program that has exclusive control of it ({text}). "
+                "Close that program or pick another mic, or turn off 'Allow applications to take exclusive "
+                "control of this device' in the mic's Sound properties (Advanced tab).")
+    return text
+
 
 def _resample(x: np.ndarray, src: int, dst: int) -> np.ndarray:
     if src == dst or x.size == 0:
@@ -204,18 +220,29 @@ class LocalAudio:
     def start(self) -> None:
         import sounddevice as sd
 
-        raw = self._open_raw_input()
-        if raw is not None:
-            self._in_stream, self.in_rate = raw
-            self.capture = f"raw (WASAPI exclusive, {self.in_rate // 1000} kHz)"
-        else:
-            self._in_stream, self.in_rate = self._open(sd.InputStream, self.input_device, self._on_input)
-            api = sd.query_hostapis(sd.query_devices(self.input_device if self.input_device is not None
-                                                     else sd.default.device[0])["hostapi"])["name"]
-            self.capture = f"shared ({api}) - Windows audio effects apply"
-        self._out_stream, self.out_rate = self._open(sd.OutputStream, self.output_device, self._on_output)
-        self._in_stream.start()
-        self._out_stream.start()
+        with _active_lock:
+            others = [a for a in _active if a is not self]
+        for other in others:
+            other.stop()
+        with _active_lock:
+            _active.add(self)
+        try:
+            raw = self._open_raw_input()
+            if raw is not None:
+                self._in_stream, self.in_rate = raw
+                self.capture = f"raw (WASAPI exclusive, {self.in_rate // 1000} kHz)"
+            else:
+                self._in_stream, self.in_rate = self._open(sd.InputStream, self.input_device, self._on_input)
+                api = sd.query_hostapis(sd.query_devices(self.input_device if self.input_device is not None
+                                                         else sd.default.device[0])["hostapi"])["name"]
+                self.capture = f"shared ({api}) - Windows audio effects apply"
+            self._out_stream, self.out_rate = self._open(sd.OutputStream, self.output_device, self._on_output)
+            self._in_stream.start()
+            self._out_stream.start()
+        except Exception as exc:
+            # Close what did open, or the mic stays locked for the next call.
+            self.stop()
+            raise RuntimeError(_explain(exc)) from exc
         try:
             self.latency = float(self._out_stream.latency) + BLOCK_S
         except Exception:  # noqa: BLE001
@@ -226,9 +253,15 @@ class LocalAudio:
             if stream is not None:
                 try:
                     stream.stop()
-                    stream.close()
                 except Exception:  # noqa: BLE001
                     pass
+                finally:
+                    try:
+                        stream.close()
+                    except Exception:  # noqa: BLE001
+                        pass
         self._in_stream = self._out_stream = None
+        with _active_lock:
+            _active.discard(self)
         self._resampler = None
         self.clear()
