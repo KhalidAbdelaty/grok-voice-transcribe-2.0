@@ -1,0 +1,95 @@
+{
+  "total_duration_ms": 79522,
+  "turns": [
+    {
+      "turn_id": 1,
+      "speaker": "maya",
+      "start_ms": 0,
+      "end_ms": 4680,
+      "duration_ms": 4680,
+      "notes": "opening, product name #1",
+      "plain_text": "Thank you for calling Qivora Sync support, this is Maya. How can I help you today?"
+    },
+    {
+      "turn_id": 2,
+      "speaker": "khalid",
+      "start_ms": 5080,
+      "end_ms": 15688,
+      "duration_ms": 10608,
+      "notes": "filler words (uh, um), product name #2",
+      "plain_text": "Hi, uh, yeah, I'm having a problem with Qivora Sync. It keeps failing to sync my files between my laptop and my phone, and, um, it's been happening since yesterday."
+    },
+    {
+      "turn_id": 3,
+      "speaker": "maya",
+      "start_ms": 15738,
+      "end_ms": 21378,
+      "duration_ms": 5640,
+      "notes": "overlap target: starts slightly before turn 2 fully ends at mix time",
+      "plain_text": "I'm sorry about that. Let me pull up your account. Can I get your phone number and email address, please?"
+    },
+    {
+      "turn_id": 4,
+      "speaker": "khalid",
+      "start_ms": 21778,
+      "end_ms": 38434,
+      "duration_ms": 16656,
+      "notes": "English->Egyptian Arabic->English code switch, phone number with mid-dictation pause, spoken email",
+      "plain_text": "Sure, one second. Tayyib khalliini bass adawwar 'ala el mobile, tamaam ma3aaya dilwa'ti. Okay, got it. So it's zero one zero, five five five, one two three four. And the email is khalid dot demo at qivorasync dot com."
+    },
+    {
+      "turn_id": 5,
+      "speaker": "maya",
+      "start_ms": 38834,
+      "end_ms": 51362,
+      "duration_ms": 12528,
+      "notes": "filler word (uh), product name #3, introduces third speaker",
+      "plain_text": "Got it, thank you. Let me check the sync logs real quick. Uh, okay, I can see a few failed sync attempts on Qivora Sync. Let me bring in Nadia from our escalation team to take a closer look."
+    },
+    {
+      "turn_id": 6,
+      "speaker": "nadia",
+      "start_ms": 51762,
+      "end_ms": 60210,
+      "duration_ms": 8448,
+      "notes": "third speaker's first turn",
+      "plain_text": "Hi Khalid, this is Nadia from the escalation team. I can see the failed syncs on your account. Give me just a second to check something on our end."
+    },
+    {
+      "turn_id": 7,
+      "speaker": "khalid",
+      "start_ms": 60610,
+      "end_ms": 62338,
+      "duration_ms": 1728,
+      "notes": "short acknowledgement",
+      "plain_text": "Okay, thank you so much."
+    },
+    {
+      "turn_id": 8,
+      "speaker": "nadia",
+      "start_ms": 62738,
+      "end_ms": 74066,
+      "duration_ms": 11328,
+      "notes": "product name #4, resolution",
+      "plain_text": "Found it. There was a stale sync token on our backend for your account, and that's what was blocking Qivora Sync. I've cleared it, so it should sync properly now. Is there anything else I can help with?"
+    },
+    {
+      "turn_id": 9,
+      "speaker": "khalid",
+      "start_ms": 74466,
+      "end_ms": 76746,
+      "duration_ms": 2280,
+      "notes": "closing",
+      "plain_text": "No, that's everything. Thank you both."
+    },
+    {
+      "turn_id": 10,
+      "speaker": "maya",
+      "start_ms": 77146,
+      "end_ms": 79522,
+      "duration_ms": 2376,
+      "notes": "closing",
+      "plain_text": "You're very welcome. Have a great day!"
+    }
+  ]
+}

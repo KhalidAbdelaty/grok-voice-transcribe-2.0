@@ -1,0 +1,29 @@
+# Allow-list: this folder also holds the article draft, the brief, research
+# notes and downloaded docs, none of which belong in the code repo.
+/*
+!/.gitignore
+!/.env.example
+!/README.md
+!/requirements.txt
+!/run_app.py
+!/app_streamlit.py
+!/project/
+
+/project/*
+!/project/.streamlit/
+!/project/ground_truth/
+!/project/scripts/
+!/project/results/
+!/project/log_hygiene.py
+!/project/ui_theme.py
+!/project/win_asyncio_fix.py
+
+# Results are written by the scripts; only the captured streaming events the
+# offline test replays are kept.
+/project/results/*
+!/project/results/08_streaming_smartturn_events.json
+
+# Never
+.env
+__pycache__/
+*.pyc

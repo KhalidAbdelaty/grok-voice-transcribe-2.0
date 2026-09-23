@@ -1,0 +1,13 @@
+# Everything in the repo: the batch/streaming clients, the checks, and the live app.
+requests>=2.31
+websockets>=16
+numpy>=1.26
+
+# Live companion app (app_streamlit.py): continuous mic streaming over WebRTC.
+streamlit>=1.63
+streamlit-webrtc==0.76.3
+av==17.1.0
+aiortc==1.15.0
+
+# The app's "This computer" audio path: direct mic and speaker access.
+sounddevice>=0.5
