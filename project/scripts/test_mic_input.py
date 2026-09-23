@@ -156,6 +156,31 @@ for f in frames(quick):
 check("quick words: loud time in the window reaches the 0.2 s pause bar", best_recent >= 0.2 and best_run < 0.2,
       f"longest run {best_run:.2f}s, in window {best_recent:.2f}s")
 
+# Sealed headset (GM301, -54 dB leak), then a later reply the caller talks
+# over from its first second (call_20260923_055121). The leak window holds
+# agent-playing frames from both replies, so the caller's voice stays a
+# minority: headset mode and the lower barge bar survive, and no_echo() lets
+# the caller's words count even when they repeat the agent's.
+mic = MicInput(source="local")
+feed(mic, noise(0.0005, 2.0))
+mic.set_echo_reference(0.12, playing=True)
+feed(mic, agent[: 16000 * 5] * 0.002 + noise(0.0005, 5.0))  # first reply: only the faint leak
+mic.set_echo_reference(0.0, playing=False)
+feed(mic, noise(0.0005, 8.0))  # the caller's turn, longer than the old 6 s window
+mic.set_echo_reference(0.12, playing=True)
+caller, _ = sentence(0.0, 0.04, 1.5)
+feed(mic, agent[: len(caller)] * 0.002 + caller)  # second reply, caller over its start
+stats = mic.stats()
+check("headset: caller over a reply's start doesn't read as echo", stats["coupling_db"] < -45 and mic.no_echo(),
+      f"coupling {stats['coupling_db']} dB")
+check("headset: barge bar stays at the headset level", stats["barge_thr"] <= 0.0101, f"barge_thr={stats['barge_thr']}")
+for source, leak in (("local", 0.3), ("browser", 0.002)):
+    other = MicInput(source=source)
+    feed(other, noise(0.0005, 2.0))
+    other.set_echo_reference(0.12, playing=True)
+    feed(other, agent[: 16000 * 3] * leak + noise(0.0005, 3.0))
+    check(f"no_echo is off for {source} at {leak:.1%} leak", not other.no_echo(), f"coupling {other.stats()['coupling_db']} dB")
+
 # Phone mode degrades what Transcribe hears, not what the detector measures:
 # the level used for speech and barge-in must match the plain mic.
 def mean_rms(mic: MicInput, signal: np.ndarray) -> float:

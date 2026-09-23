@@ -77,7 +77,7 @@ def spoken_email(text: str, partial_ok: bool = False) -> str | None:
     # ("Khalid. demo"); in the domain a full stop followed by a space ends
     # the sentence instead ("... dot com. Could you ...").
     name_dot = r"(?:\s*\.\s*|\s+dot\s+)"
-    domain_dot = r"(?:\s+dot\s+|\.(?=[a-z0-9]))"
+    domain_dot = r"(?:\.?\s+dot\s+|\.(?=[a-z0-9]))"  # also "Sync. dot com"
     word = r"(?!(?:and|my|is|the|a|to|so|at|dot)\b)[a-z0-9]+"
     spelled = rf"(?:\b[a-z] )*\b{word}"  # "q i v o r a sync", "c h a l i d"
     m = re.search(rf"({spelled}(?:{name_dot}{word})*)(?:\s+dot)?\s+at\s+({spelled}(?:\s+{word})?(?:{domain_dot}{word})*)", low)
@@ -98,8 +98,10 @@ def spoken_email(text: str, partial_ok: bool = False) -> str | None:
 def number_read_out(texts: list[tuple[int, str]]) -> tuple[list[int], str] | None:
     """A phone number the caller read out: seven or more digits in one turn,
     or pieces over the next few turns (the agent asks for "the rest": "0 1 0.
-    2 5. 6." in one turn, "five five" two turns later). Returns the turns and
-    the digits heard, or None."""
+    2 5. 6." in one turn, "five five" two turns later). A later turn that
+    repeats the number from the start ("0 1 2 4 5, uh, 6 7", then "the rest
+    is 0 1 2 4 5 6 7", call_20260923_055121) replaces the pieces instead of
+    being added to them. Returns the turns and the digits heard, or None."""
     runs = [(t, longest_digit_run(text)) for t, text in texts]
     runs = [(t, d) for t, d in runs if len(d) >= 2]
     for i, (t, d) in enumerate(runs):
@@ -109,8 +111,15 @@ def number_read_out(texts: list[tuple[int, str]]) -> tuple[list[int], str] | Non
         for t2, d2 in runs[i + 1 : i + 3]:
             if t2 - turns[-1] > 4:  # a caller turn, an agent reply, and back
                 break
-            turns.append(t2)
-            digits += d2
+            if len(d2) >= 7:
+                return [t2], d2
+            if d2.startswith(digits) or digits.startswith(d2):
+                # Said again from the start: keep the longer take.
+                if len(d2) > len(digits):
+                    turns, digits = [t2], d2
+            else:
+                turns.append(t2)
+                digits += d2
             if len(digits) >= 7:
                 return turns, digits
     return None

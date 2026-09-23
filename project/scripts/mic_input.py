@@ -52,6 +52,10 @@ SPEECH_FLOOR_RATIO = 3.0
 BARGE_MIN_RMS = 0.015
 BARGE_MIN_RMS_HEADSET = 0.010
 HEADSET_COUPLING = 10 ** (-30 / 20)  # -30 dB
+# Below this measured leak (a sealed headset, GM301: -54 dB) the agent never
+# reaches the mic at a level the listener could transcribe, so every word the
+# listener hears is the caller's - even the agent's own words said back.
+NO_ECHO_COUPLING = 10 ** (-45 / 20)
 BARGE_FLOOR_RATIO = 4.0
 # How much of the agent's playback actually reaches the mic ("coupling") is
 # measured during the call, not guessed (entry 19): a fixed 0.8 x playback
@@ -59,7 +63,12 @@ BARGE_FLOOR_RATIO = 4.0
 # clear it. Until enough frames are measured, start from these per path
 # (the browser's echo canceller removes most of the leak).
 COUPLING_SEED = {"browser": 0.1, "local": 0.3}
-COUPLING_WINDOW_S = 6.0
+# The last 6 s of frames heard *while the agent was playing*, however far
+# apart. A window of 6 s of wall-clock time held only the start of the
+# current reply, so a caller talking over its first second made up most of
+# it and read as a -29 dB leak on a -54 dB headset (call_20260923_055121);
+# that switched headset mode off and raised the barge-in bar.
+COUPLING_WINDOW_FRAMES = 300
 # 60th percentile of mic/playback while the agent plays: sits at the echo's
 # typical level (the syllable peaks are covered by the margins below), and
 # only moves if the caller talks over more than 40% of the agent's time.
@@ -114,7 +123,7 @@ class MicInput:
         self.boost = max(1.0, float(boost))
         self.source = source
         self.coupling = COUPLING_SEED.get(source, 0.3)
-        self._coupling_hist: deque[tuple[float, float]] = deque()  # (time, mic_rms / playback_rms)
+        self._coupling_hist: deque[float] = deque(maxlen=COUPLING_WINDOW_FRAMES)  # mic_rms / playback_rms
         self._coupling_since = 0
         self.echo_playing = False
         self._chunk = bytearray()
@@ -259,13 +268,11 @@ class MicInput:
         frames heard while it plays (see COUPLING_PERCENTILE)."""
         if not self.echo_playing or self.echo_ref < 0.02:
             return
-        self._coupling_hist.append((now, rms / self.echo_ref))
-        while self._coupling_hist and now - self._coupling_hist[0][0] > COUPLING_WINDOW_S:
-            self._coupling_hist.popleft()
+        self._coupling_hist.append(rms / self.echo_ref)
         self._coupling_since += 1
         if len(self._coupling_hist) >= COUPLING_MIN_FRAMES and self._coupling_since >= 5:
             self._coupling_since = 0
-            ratios = np.fromiter((r for _, r in self._coupling_hist), dtype=np.float32, count=len(self._coupling_hist))
+            ratios = np.fromiter(self._coupling_hist, dtype=np.float32, count=len(self._coupling_hist))
             self.coupling = float(min(COUPLING_MAX, max(COUPLING_MIN, np.percentile(ratios, COUPLING_PERCENTILE))))
 
     def _update_levels(self, rms: float, now: float, dur: float = 0.02, zero_frame: bool = False) -> None:
@@ -377,6 +384,14 @@ class MicInput:
             if self._loud_start is None or time.time() - self._loud_last > RUN_GAP_S:
                 return 0.0
             return self._loud_start
+
+    def no_echo(self) -> bool:
+        """The agent's voice measurably can't reach this mic (a sealed
+        headset on the local path). The browser path is left out: what its
+        echo canceller leaves behind varies from moment to moment."""
+        with self._lock:
+            return (self.source == "local" and len(self._coupling_hist) >= COUPLING_MIN_FRAMES
+                    and self.coupling < NO_ECHO_COUPLING)
 
     def frames_recent(self, within_s: float = 2.0) -> bool:
         return self.last_frame_at > 0 and time.time() - self.last_frame_at < within_s

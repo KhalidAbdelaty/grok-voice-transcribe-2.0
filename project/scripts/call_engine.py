@@ -1224,7 +1224,11 @@ class CallEngine:
         # The most recent words: when the caller talks over leaked echo, the
         # tail is theirs even if the start of the utterance was the agent.
         self.listener_tokens = _tokens(text)[-LISTENER_WINDOW_WORDS:]
-        vocab = self._agent_vocab()
+        # On a sealed headset nothing the listener hears is the agent's echo:
+        # the caller saying the agent's own words back ("khaled dot demo..."
+        # over Maya's read-back) used to be filtered out as echo, so she
+        # resumed twice and the caller had to shout (call_20260923_055121).
+        vocab = set() if self.mic.no_echo() else self._agent_vocab()
         self.new_words = [w for w in self.listener_tokens if w not in BACKCHANNEL and not _is_echo_word(w, vocab)]
         if self.new_words and not self.barge_seen_at:
             # Partials trail the audio by roughly a second.
