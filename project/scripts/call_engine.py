@@ -60,7 +60,7 @@ MAX_SPECULATIONS = 4  # per caller turn; each discarded guess costs one short mo
 SILENCE_WATCHDOG_S = 6.0
 BARGE_MIN_PLAYBACK_S = 0.4
 # Voice barge-in (see _step_barge_in).
-STRONG_CANDIDATE_S = 0.2
+STRONG_CANDIDATE_S = 0.15  # a short "Wait." is ~0.28 s of loud frames spread over 0.6 s
 FALSE_PAUSE_S = 1.5
 FALSE_PAUSE_QUIET_S = 0.6
 MAX_PAUSE_S = 4.0
@@ -89,6 +89,10 @@ MAX_CONTINUES = 3
 # block a reply forever).
 CALLER_QUIET_S = 0.3
 MAX_WAIT_FOR_QUIET_S = 2.5
+# A caller turn that ends on fewer digits than a phone number: wait this long
+# after the turn closed before answering, in case they are still dictating.
+NUMBER_HOLD_S = 1.8
+FULL_NUMBER_DIGITS = 7
 ECHO_TAIL_S = 0.25
 # The mic reopens once it has been this quiet after the agent's audio ends,
 # or after ECHO_SETTLE_MAX_S at the latest (see _echo_settled).
@@ -195,6 +199,13 @@ BACKCHANNEL = {
     "mm", "mmm", "mhm", "hmm", "hm", "uh", "um", "umm", "er", "erm", "huh", "uhhuh", "uh-huh", "ah", "aha", "oh",
     "yeah", "yes", "yep", "yup", "okay", "ok", "right", "sure", "alright", "cool",
 }
+# Words that mean "stop talking" on their own: one of these from the listener
+# cuts the agent, where any other single word needs a pause or a second word.
+INTERRUPT_WORDS = {"wait", "stop", "hold", "no", "nope", "sorry", "excuse", "what", "hey", "pardon",
+                   "actually", "hang", "listen"}
+# The mic heard the caller over the echo this recently: a single new word is
+# their own, not a mis-heard echo.
+RECENT_OVER_ECHO_S = 1.0
 # Hesitations Transcribe returns with filler_words=true.
 FILLERS = {"um", "umm", "uh", "uhm", "er", "erm", "hmm", "hm", "mm", "mmm", "ah"}
 
@@ -208,6 +219,17 @@ SPOKEN_SYMBOLS = {"dot", "at", "dash", "hyphen", "underscore", "slash", "point"}
 
 def _tokens(text: str) -> list[str]:
     return [NUMBER_WORDS.get(t, t) for t in re.findall(r"[\w'-]+", text.lower())]
+
+
+def _trailing_digits(text: str) -> int:
+    """How many digits the text ends on ("my number is 0 2 1 5." -> 4,
+    "zero one zero" -> 3, "one second" -> 0)."""
+    count = 0
+    for tok in reversed(_tokens(text)):
+        if not tok.isdigit():
+            break
+        count += len(tok)
+    return count
 
 
 def _spoken_vocab(text: str) -> set[str]:
@@ -359,6 +381,7 @@ class CallEngine:
         self.phantoms_ignored: list[str] = []
         self._turn_audio_from = 0.0
         self._turn_had_prefix = False
+        self._number_hold = False
         self.last_play_end = 0.0
         self.last_play_rms = 0.0
         self.prev_agent_text = ""
@@ -953,6 +976,8 @@ class CallEngine:
         self.caller_speech_end = speech_end
         self.caller_turn_closed_at = now
         self._record_turn("khalid", result, smart_turn_ms=int(max(0.0, now - speech_end) * 1000))
+        # Judged on the whole bubble, so a number split across a merge counts once.
+        self._number_hold = 0 < _trailing_digits(self.record[-1]["heard_by_transcribe"]) < FULL_NUMBER_DIGITS
 
         if (
             self.job is not None
@@ -1005,6 +1030,13 @@ class CallEngine:
             # tiny pause mid-sentence, and with the reply already drafted the
             # agent used to start 0.2 s later, on top of them. The reply keeps
             # generating; its audio just waits for a breath.
+            return
+
+        if self.phase == "thinking" and self._number_hold and now - self.caller_turn_closed_at < NUMBER_HOLD_S:
+            # The turn closed mid-number ("my phone number is 0 2 1 5."):
+            # Smart Turn scored that 0.87, as confident as a finished sentence.
+            # Give the caller a moment to carry on before answering half a
+            # number; if they do, the continue path above joins it up.
             return
 
         # Collect whatever TTS audio has arrived; playback is paced from here.
@@ -1206,15 +1238,21 @@ class CallEngine:
             self._barge_in(now)
             return
 
-        need = 1 if self.paused else 2
         n_new = len(self.new_words)
         mostly_new = n_new >= 0.5 * max(1, len(self.listener_tokens))
-        # Without a pause, two new words that make up most of what the listener
-        # just heard are enough. Level alone can't be the gate: on a headset
-        # the caller can be only a few dB above the leaked agent (the GM301
-        # call, entry 19), and the agent's own read-backs are already filtered
-        # out as echo by `_spoken_vocab`.
-        confirmed = self.paused or mostly_new
+        # One word is enough (LiveKit's min_words=1) when it is an interrupt
+        # word ("wait", "stop", "what"), when the agent is already paused, or
+        # when the mic heard the caller over the echo just now. Otherwise two
+        # new words that make up most of what the listener heard. The agent's
+        # own words (`_spoken_vocab`) and backchannels never count.
+        interrupt_word = any(w in INTERRUPT_WORDS for w in self.new_words)
+        single_ok = self.paused or interrupt_word or now - mic.last_over_echo_at < RECENT_OVER_ECHO_S
+        need = 1 if single_ok else 2
+        # An interrupt word doesn't have to be most of what the listener heard:
+        # it also transcribes the agent's faint echo ("hi thank you for calling
+        # keep wait"), which the echo filter removes from the new words but not
+        # from the count.
+        confirmed = self.paused or interrupt_word or mostly_new
         if n_new >= need and confirmed:
             self.barge_reason = f"{n_new} new word{'s' if n_new != 1 else ''}: \u201c{' '.join(self.new_words[-6:])}\u201d"
             self._barge_in(now)

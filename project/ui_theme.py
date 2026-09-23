@@ -502,6 +502,11 @@ def render_stage(snap: dict, first_turn: bool) -> str:
             foot = '<div class="stage-foot">\u26A1 A reply is already being drafted while Smart Turn confirms you\u2019re done.</div>'
         elif not snap.get("mic_ok"):
             foot = '<div class="stage-foot" style="color:var(--danger)">No audio is arriving from your microphone - check the device, or reconnect it above.</div>'
+        elif (snap.get("mic_stats") or {}).get("gated"):
+            foot = ('<div class="stage-foot" style="color:var(--warn)">Windows is noise-gating your mic (Voice Clarity / '
+                    "audio enhancements): quiet syllables arrive as digital silence and words go missing. Turn it off in "
+                    "Settings &gt; System &gt; Sound &gt; your mic &gt; Audio enhancements: Off, or use the "
+                    "\u201cThis computer\u201d audio path, which captures the mic raw.</div>")
         elif snap.get("stt_silent"):
             foot = ('<div class="stage-foot" style="color:var(--danger)">Your mic hears you, but Transcribe hasn\u2019t '
                     "returned any words for a while - try a higher Mic boost or a lower voice-activity sensitivity, "
@@ -627,6 +632,8 @@ def render_diagnostics(snap: dict, device_label: str) -> str:
         ("Sent to Transcribe", f"{m.get('forwarded_s', 0):.0f}s of your audio"),
         ("Transcript events", f"{snap.get('stt_partials', 0)} \u00b7 last {partial_age:.0f}s ago" if partial_age is not None else "none yet"),
         ("Mic boost", f"{m.get('boost', 1.0):.1f}x"),
+        ("Noise gate", f"{m.get('gated_pct', 0)}% of quiet frames are digital silence"
+                       + (" - Windows audio enhancements are gating this mic" if m.get("gated") else " (a live mic is near 0%)")),
         ("Echo reaching the mic", f"{m.get('coupling_db', 0):.0f} dB of the agent's playback"
                                   + ("" if m.get("coupling_measured") else " (estimate - measured once an agent speaks)")),
         ("Barge-in", f"pauses above {20 * math.log10(max(m.get('barge_thr', 1e-6), 1e-6)):.0f} dB, cuts on your words"

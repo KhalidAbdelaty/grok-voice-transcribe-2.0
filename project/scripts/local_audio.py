@@ -7,10 +7,16 @@ localhost anyway, so this path opens the devices straight from Python with
 sounddevice - the same pattern as the GPT Live Transcribe project's
 mic_stream.py - and lets you pick the exact mic and speakers.
 
-- Input: 16 kHz mono int16 in 20 ms blocks, straight into MicInput.feed_pcm.
+- Input: raw capture first - the chosen mic's WASAPI twin in exclusive
+  mode, at its native rate, resampled to 16 kHz with PyAV. Shared capture
+  (MME, WASAPI shared, and every browser) runs through the Windows audio
+  engine's effects (Voice Clarity, noise suppression), and on a GM301
+  headset those gate silence to exact digital zero and chop quiet
+  syllables; exclusive mode bypasses them. If exclusive is refused (another
+  app holds the mic), it falls back to shared capture and says so.
 - Output: the agent voice, with the same push()/clear() interface as the
   WebRTC PcmAudioSource, so CallEngine doesn't know which path it is on.
-- If a device refuses 16 kHz, it is opened at its own rate and resampled.
+- If an output device refuses 16 kHz, it is opened at its own rate.
 
 There is no echo canceller on this path, so the agent's voice from open
 speakers reaches the mic; the app turns barge-in off here unless you say
@@ -56,6 +62,23 @@ def list_devices() -> dict:
     return {"inputs": inputs, "outputs": outputs, "default_in": default_in, "default_out": default_out}
 
 
+def wasapi_twin(device: int | None) -> int | None:
+    """The WASAPI index of the same physical mic as `device` (an index on
+    the default host API, usually MME). MME cuts names at 31 characters, so
+    the WASAPI name only has to start with the MME one."""
+    import sounddevice as sd
+
+    try:
+        name = sd.query_devices(device if device is not None else sd.default.device[0])["name"]
+        wasapi = next(i for i, h in enumerate(sd.query_hostapis()) if "WASAPI" in h["name"])
+    except Exception:  # noqa: BLE001 - not Windows, or no WASAPI
+        return None
+    for i, d in enumerate(sd.query_devices()):
+        if d["hostapi"] == wasapi and d["max_input_channels"] > 0 and d["name"].startswith(name):
+            return i
+    return None
+
+
 class LocalAudio:
     def __init__(self, mic, input_device: int | None = None, output_device: int | None = None) -> None:
         self.mic = mic
@@ -69,6 +92,9 @@ class LocalAudio:
         self.out_rate = SAMPLE_RATE
         self.errors: list[str] = []
         self.status_flags = 0
+        self.capture = "not started"  # "raw (WASAPI exclusive)" or "shared (...)", for the diagnostics
+        self._resampler = None
+        self._in_channels = 1
         # Seconds between push() and the sound leaving the speakers; the
         # engine adds it to its echo tail before reopening the mic.
         self.latency = 0.0
@@ -103,14 +129,57 @@ class LocalAudio:
                          blocksize=int(rate * BLOCK_S), device=device, callback=callback)
         return stream, rate
 
+    def _open_raw_input(self):
+        """The mic's WASAPI twin in exclusive mode (bypasses Windows audio
+        effects), at its native rate; None if there is no twin or it is
+        refused."""
+        import sounddevice as sd
+
+        twin = wasapi_twin(self.input_device)
+        if twin is None:
+            self.errors.append("no WASAPI device for this mic; using shared capture")
+            return None
+        info = sd.query_devices(twin)
+        rate = int(info["default_samplerate"])
+        for channels in dict.fromkeys((1, int(info["max_input_channels"]))):
+            try:
+                stream = sd.InputStream(
+                    samplerate=rate, channels=channels, dtype="int16", blocksize=int(rate * BLOCK_S),
+                    device=twin, callback=self._on_input, extra_settings=sd.WasapiSettings(exclusive=True),
+                )
+                self._in_channels = channels
+                return stream, rate
+            except Exception as exc:  # noqa: BLE001 - try the device's own channel count, then give up
+                last = exc
+        self.errors.append(f"exclusive capture refused ({last}); using shared capture")
+        return None
+
+    def _to_16k(self, x: np.ndarray) -> np.ndarray:
+        """Native-rate int16 -> 16 kHz int16. PyAV's resampler is stateful
+        and low-passes, unlike per-block interpolation, which clicks at block
+        edges and aliases when dropping 48 kHz to 16 kHz."""
+        if self.in_rate == SAMPLE_RATE:
+            return x
+        try:
+            import av
+
+            if self._resampler is None:
+                self._resampler = av.AudioResampler(format="s16", layout="mono", rate=SAMPLE_RATE)
+            frame = av.AudioFrame.from_ndarray(x.reshape(1, -1), format="s16", layout="mono")
+            frame.sample_rate = self.in_rate
+            out = [f.to_ndarray().reshape(-1) for f in self._resampler.resample(frame)]
+            return np.concatenate(out) if out else np.zeros(0, dtype=np.int16)
+        except Exception:  # noqa: BLE001 - fall back to plain interpolation
+            return np.clip(_resample(x, self.in_rate, SAMPLE_RATE), -32768, 32767).astype(np.int16)
+
     def _on_input(self, indata, frames, time_info, status) -> None:
         if status:
             self.status_flags += 1
         try:
-            x = indata[:, 0]
-            if self.in_rate != SAMPLE_RATE:
-                x = np.clip(_resample(x, self.in_rate, SAMPLE_RATE), -32768, 32767).astype(np.int16)
-            self.mic.feed_pcm(x.astype(np.int16).tobytes())
+            x = np.ascontiguousarray(indata[:, 0], dtype=np.int16)
+            x = self._to_16k(x)
+            if x.size:
+                self.mic.feed_pcm(x.astype(np.int16).tobytes())
         except Exception as exc:  # noqa: BLE001 - never raise inside the audio callback
             if len(self.errors) < 20:
                 self.errors.append(f"input: {exc}")
@@ -135,7 +204,15 @@ class LocalAudio:
     def start(self) -> None:
         import sounddevice as sd
 
-        self._in_stream, self.in_rate = self._open(sd.InputStream, self.input_device, self._on_input)
+        raw = self._open_raw_input()
+        if raw is not None:
+            self._in_stream, self.in_rate = raw
+            self.capture = f"raw (WASAPI exclusive, {self.in_rate // 1000} kHz)"
+        else:
+            self._in_stream, self.in_rate = self._open(sd.InputStream, self.input_device, self._on_input)
+            api = sd.query_hostapis(sd.query_devices(self.input_device if self.input_device is not None
+                                                     else sd.default.device[0])["hostapi"])["name"]
+            self.capture = f"shared ({api}) - Windows audio effects apply"
         self._out_stream, self.out_rate = self._open(sd.OutputStream, self.output_device, self._on_output)
         self._in_stream.start()
         self._out_stream.start()
@@ -153,4 +230,5 @@ class LocalAudio:
                 except Exception:  # noqa: BLE001
                     pass
         self._in_stream = self._out_stream = None
+        self._resampler = None
         self.clear()

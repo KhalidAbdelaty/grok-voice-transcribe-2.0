@@ -247,8 +247,11 @@ def run_barge_in() -> None:
               f"{cut_at - talk_at:.2f}s (reason: {engine.barge_reason}, coupling {engine.mic.stats()['coupling_db']} dB)")
         wait_for(lambda: phase(engine) == "listening", 30, "the caller's turn after the barge-in")
         print(f">>> Maya's turn closed, caller's turn opened {time.time() - cut_at:.2f}s after the cut")
-        wait_for(lambda: phase(engine) in ("thinking", "speaking"), 60, "the reply to the interruption")
-        wait_for(lambda: phase(engine) in ("listening", "ended", "ending", "error"), 90, "that reply to finish")
+        # An agent turn, not a phase change: going back to "listening" can also
+        # mean the engine noticed the caller was still talking.
+        n = agent_turns(engine)
+        wait_for(lambda: agent_turns(engine) > n or phase(engine) in ("ended", "ending", "error"), 120,
+                 "the reply to the interruption")
         time.sleep(1.0)
     finally:
         mic.stop.set()
@@ -401,6 +404,73 @@ def run_toggle() -> None:
         engine.end()
 
 
+def run_wait_word() -> None:
+    """A single "Wait." over Maya must cut her (LiveKit's min_words=1 for
+    interrupt words), where a single "Yeah." must not (see backchannel)."""
+    from scripts.tts_stream import synthesize_pcm_rest
+
+    wait = synthesize_pcm_rest("Wait.", VOICES["khalid"])
+    engine, mic = make_engine(FAST_MODEL, True)
+    try:
+        wait_for(lambda: phase(engine) == "listening", 30, "listening")
+        time.sleep(CALLER_WAIT)
+        mic.say(line("turn02_khalid.wav"))
+        wait_for(lambda: phase(engine) == "speaking", 60, "Maya to start speaking")
+        time.sleep(1.5)
+        print(">>> 'Wait.' over Maya now")
+        t0 = time.time()
+        mic.say(wait)
+        try:
+            wait_for(lambda: engine.snapshot()["interrupted"], 8, "the cut")
+            print(f">>> cut {time.time() - t0:.2f}s after 'Wait.' started ({engine.barge_reason})")
+        except TimeoutError:
+            print(">>> no cut within 8 s")
+        wait_for(lambda: phase(engine) in ("listening", "ended", "ending", "error"), 60, "the turn to close")
+        time.sleep(1.0)
+    finally:
+        mic.stop.set()
+        print_report(engine)
+        agent = [r for r in engine.snapshot()["record"] if r["speaker"] != "khalid"]
+        ok = bool(agent) and agent[0]["interrupted"]
+        print("\nWAIT-WORD", "PASS" if ok else "FAIL")
+        engine.end()
+
+
+def run_number_hold() -> None:
+    """A phone number dictated with a pause in the middle: Smart Turn may
+    close the turn at the pause, but the agent must not answer half a
+    number, and both halves must end up in one caller turn."""
+    from scripts.tts_stream import synthesize_pcm_rest
+
+    first = synthesize_pcm_rest("Yeah, my phone number is zero one zero five.", VOICES["khalid"])
+    second = synthesize_pcm_rest("Five five one two three four.", VOICES["khalid"])
+    engine, mic = make_engine(FAST_MODEL, True)
+    try:
+        wait_for(lambda: phase(engine) == "listening", 30, "listening")
+        time.sleep(CALLER_WAIT)
+        mic.say(line("turn02_khalid.wav"))
+        wait_for(lambda: agent_turns(engine) >= 1 and phase(engine) == "listening", 90, "Maya's first reply")
+        time.sleep(CALLER_WAIT)
+        n = agent_turns(engine)
+        print(">>> number, first half, then 1.2 s of silence, then the rest")
+        mic.say(first)
+        wait_for(lambda: not mic.talking, 20, "the first half")
+        time.sleep(1.2)
+        answered_early = agent_turns(engine) > n or phase(engine) == "speaking"
+        mic.say(second)
+        wait_for(lambda: agent_turns(engine) > n or phase(engine) in ("ended", "ending", "error"), 90, "the reply")
+        time.sleep(1.0)
+    finally:
+        mic.stop.set()
+        print_report(engine)
+        callers = [r for r in engine.snapshot()["record"] if r["speaker"] == "khalid"]
+        last = callers[-1]["heard_by_transcribe"] if callers else ""
+        digits = "".join(ch for ch in last if ch.isdigit())
+        print(f"\nlast caller turn: {ascii(last)} -> digits {digits}, agent answered mid-number: {answered_early}")
+        print("NUMBER-HOLD", "PASS" if "0105551234" in digits and not answered_early else "FAIL")
+        engine.end()
+
+
 def _pop_option(args: list[str], name: str) -> float:
     if name in args:
         i = args.index(name)
@@ -439,6 +509,10 @@ if __name__ == "__main__":
         run_arabic()
     elif mode == "toggle":
         run_toggle()
+    elif mode == "wait-word":
+        run_wait_word()
+    elif mode == "number-hold":
+        run_number_hold()
     else:
         model = sys.argv[2] if len(sys.argv) > 2 else FAST_MODEL
         priority = (sys.argv[3] != "0") if len(sys.argv) > 3 else True

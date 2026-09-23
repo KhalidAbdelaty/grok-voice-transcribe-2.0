@@ -16,6 +16,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from scripts.audio_utils import wav_file_to_pcm16_16k  # noqa: E402
 from scripts.mic_input import MicInput  # noqa: E402
+from scripts.phone_line import PhoneLine  # noqa: E402
 
 FRAME = 320  # 20 ms at 16 kHz
 RAW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "audio", "raw_lines")
@@ -154,6 +155,34 @@ for f in frames(quick):
     best_run, best_recent = max(best_run, mic.loud_run_s()), max(best_recent, mic.loud_recent_s())
 check("quick words: loud time in the window reaches the 0.2 s pause bar", best_recent >= 0.2 and best_run < 0.2,
       f"longest run {best_run:.2f}s, in window {best_recent:.2f}s")
+
+# Phone mode degrades what Transcribe hears, not what the detector measures:
+# the level used for speech and barge-in must match the plain mic.
+def mean_rms(mic: MicInput, signal: np.ndarray) -> float:
+    levels = []
+    for f in frames(signal):
+        mic.feed_pcm((np.clip(f, -1, 1) * 32767).astype(np.int16).tobytes())
+        clock.t += 0.02
+        levels.append(mic.rms)
+    return float(np.mean(levels))
+
+
+voice, _ = sentence(0.002, 0.04, 2.0)
+plain = mean_rms(MicInput(source="local"), voice)
+phone = mean_rms(MicInput(source="local", line=PhoneLine(seed=1)), voice)
+check("phone mode does not lower the measured level", abs(phone - plain) < 0.02 * plain,
+      f"plain {plain:.4f} vs phone {phone:.4f}")
+
+# Noise-gate detector: a mic gated to digital silence (Windows Voice Clarity)
+# is flagged; a quiet but live mic is not.
+mic = MicInput(source="local")
+feed(mic, np.zeros(16000 * 6, dtype=np.float32))
+gated = mic.stats()
+mic = MicInput(source="local")
+feed(mic, noise(0.00007, 6.0))
+live = mic.stats()
+check("gate detector trips on digital silence, not on a quiet live mic", gated["gated"] and not live["gated"],
+      f"gated {gated['gated_pct']}% vs live {live['gated_pct']}%")
 
 # The old failure, directly: AGC-level room noise from the very first frame.
 mic = MicInput()

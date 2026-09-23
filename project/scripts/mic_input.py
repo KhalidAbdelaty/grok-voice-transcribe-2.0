@@ -50,6 +50,8 @@ FLOOR_MIN, FLOOR_MAX = 0.0005, 0.08
 SPEECH_MIN_RMS = 0.006
 SPEECH_FLOOR_RATIO = 3.0
 BARGE_MIN_RMS = 0.015
+BARGE_MIN_RMS_HEADSET = 0.010
+HEADSET_COUPLING = 10 ** (-30 / 20)  # -30 dB
 BARGE_FLOOR_RATIO = 4.0
 # How much of the agent's playback actually reaches the mic ("coupling") is
 # measured during the call, not guessed (entry 19): a fixed 0.8 x playback
@@ -75,6 +77,15 @@ PHRASE_GAP_S = 0.7
 # unbroken run: syllables of quick words ("Sure,") stay above the bar for
 # ~150 ms with gaps longer than RUN_GAP_S between them.
 LOUD_WINDOW_S = 0.5
+# Noise-gate detection: over this window of non-speech frames, the share at
+# digital silence. A live mic always carries some noise; Windows' Voice
+# Clarity / audio enhancements gate it away. Measured on a GM301 in a quiet
+# room: frame RMS ~0.000015 through MME (77% zero samples, the rest +-1 LSB),
+# exactly 0 through WASAPI shared, ~0.00007 through WASAPI exclusive.
+GATE_SILENCE_RMS = 2.5e-5  # -92 dBFS
+GATE_WINDOW_S = 10.0
+GATE_MIN_FRAMES = 250  # 5 s of 20 ms frames before judging
+GATE_ZERO_SHARE = 0.5
 
 
 def _soft_limit(x: np.ndarray) -> np.ndarray:
@@ -130,6 +141,7 @@ class MicInput:
         self._loud_start: float | None = None
         self._loud_last: float = 0.0
         self._loud_frames: deque[tuple[float, float]] = deque()  # (time, duration) above the barge-in bar
+        self._quiet_frames: deque[tuple[float, bool]] = deque()  # (time, exact digital zero) below speech
         self.frames_total = 0
         self.forwarded_bytes = 0
         self.first_error: str | None = None
@@ -171,14 +183,19 @@ class MicInput:
         if self.boost > 1.0:
             samples = _soft_limit(samples * self.boost)
             pcm = (samples * 32767.0).astype(np.int16).tobytes()
-        if self.line is not None:
-            # Simulated phone line (phone_line.py): everything after this -
-            # levels, gate, Transcribe - hears the caller as a phone call would.
-            pcm = self.line.process(pcm)
-            samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-            if samples.size == 0:
-                return
+        # Levels come from the mic as captured. A frame at digital silence is
+        # what a Windows noise gate (Voice Clarity / audio enhancements) leaves
+        # behind; a live mic always has some noise.
         rms = float(np.sqrt(np.mean(samples * samples)))
+        zero_frame = rms < GATE_SILENCE_RMS
+        dur = samples.size / SAMPLE_RATE
+        if self.line is not None:
+            # Simulated phone line (phone_line.py): only what is forwarded to
+            # Transcribe is degraded. Measuring after the 300-3400 Hz filter
+            # made the caller read quieter and barge-in stop working.
+            pcm = self.line.process(pcm)
+            if not pcm:
+                return
         now = time.time()
         forward: list[bytes] = []
         with self._lock:
@@ -187,7 +204,7 @@ class MicInput:
             self._frame_times.append(now)
             while self._frame_times and now - self._frame_times[0] > 1.0:
                 self._frame_times.popleft()
-            self._update_levels(rms, now, samples.size / SAMPLE_RATE)
+            self._update_levels(rms, now, dur, zero_frame)
             if self.mode == "open":
                 self._chunk.extend(pcm)
                 while len(self._chunk) >= CHUNK_BYTES:
@@ -226,7 +243,12 @@ class MicInput:
     def _thresholds(self) -> tuple[float, float]:
         speech = max(SPEECH_MIN_RMS, SPEECH_FLOOR_RATIO * self.noise_floor)
         leak = self.coupling * self.echo_ref  # expected agent echo in the mic right now
-        barge = max(BARGE_MIN_RMS, BARGE_FLOOR_RATIO * self.noise_floor, BARGE_ECHO_MARGIN * leak)
+        # On a headset (measured coupling under -30 dB) the agent barely
+        # reaches the mic, so a quieter voice can pause it; a false pause only
+        # costs a 1.5 s hiccup before it resumes.
+        headset = len(self._coupling_hist) >= COUPLING_MIN_FRAMES and self.coupling < HEADSET_COUPLING
+        floor = BARGE_MIN_RMS_HEADSET if headset else BARGE_MIN_RMS
+        barge = max(floor, BARGE_FLOOR_RATIO * self.noise_floor, BARGE_ECHO_MARGIN * leak)
         return speech, barge
 
     def _over_echo_threshold(self, speech_thr: float) -> float:
@@ -246,7 +268,7 @@ class MicInput:
             ratios = np.fromiter((r for _, r in self._coupling_hist), dtype=np.float32, count=len(self._coupling_hist))
             self.coupling = float(min(COUPLING_MAX, max(COUPLING_MIN, np.percentile(ratios, COUPLING_PERCENTILE))))
 
-    def _update_levels(self, rms: float, now: float, dur: float = 0.02) -> None:
+    def _update_levels(self, rms: float, now: float, dur: float = 0.02, zero_frame: bool = False) -> None:
         self.rms = rms
         self._hist.append((now, rms))
         while self._hist and now - self._hist[0][0] > FLOOR_WINDOW_S:
@@ -283,6 +305,10 @@ class MicInput:
             self._loud_frames.append((now, dur))
         while self._loud_frames and now - self._loud_frames[0][0] > LOUD_WINDOW_S:
             self._loud_frames.popleft()
+        if rms <= speech_thr:
+            self._quiet_frames.append((now, zero_frame))
+        while self._quiet_frames and now - self._quiet_frames[0][0] > GATE_WINDOW_S:
+            self._quiet_frames.popleft()
         target = min(1.0, rms * 6.0)
         # Fast attack, slow release, so the meter reads as a level, not flicker.
         self.level = target if target > self.level else self.level * 0.85 + target * 0.15
@@ -367,8 +393,12 @@ class MicInput:
         with self._lock:
             speech_thr, barge_thr = self._thresholds()
             now = time.time()
+            quiet = len(self._quiet_frames)
+            zero_share = sum(1 for _, z in self._quiet_frames if z) / quiet if quiet else 0.0
             return {
                 "source": self.source,
+                "gated_pct": round(100 * zero_share),
+                "gated": quiet >= GATE_MIN_FRAMES and zero_share >= GATE_ZERO_SHARE,
                 "frames_per_s": len(self._frame_times),
                 "rms": round(self.rms, 5),
                 "dbfs": round(20 * np.log10(max(self.rms, 1e-6)), 1),

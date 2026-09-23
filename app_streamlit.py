@@ -273,9 +273,13 @@ def call_stage(engine: CallEngine) -> None:
             if snap["phone_switch_to"] is not None:
                 st.caption(f"Switching {'onto' if snap['phone_switch_to'] else 'off'} the phone line at your next pause\u2026")
 
-    with st.expander("\U0001F50E Mic diagnostics", expanded=bool(snap["only_silence"] or snap["stt_silent"])):
+    gated = bool(snap["mic_stats"].get("gated"))
+    with st.expander("\U0001F50E Mic diagnostics", expanded=bool(snap["only_silence"] or snap["stt_silent"] or gated)):
         if engine.settings.audio_path == "local":
             label = ss.get("local_device_names", ("system default", ""))[0]
+            local = ss.get("local_audio")
+            if local is not None:
+                label += f" \u00b7 {local.capture}"
         else:
             label = "the device chosen in SELECT DEVICE"
         st.markdown(ui_theme.render_diagnostics(snap, label), unsafe_allow_html=True)
@@ -396,7 +400,8 @@ def before_start_screen() -> None:
             st.caption(
                 "Headphones give the cleanest calls on this path (there is no echo canceller). Talking over "
                 "the agents works either way: a second transcription checks for your own words, so Maya's "
-                "voice coming back through open speakers doesn't count as you."
+                "voice coming back through open speakers doesn't count as you. The mic is recorded raw "
+                "(WASAPI exclusive), past Windows' voice effects, so other apps can't use it during the call."
             )
 
         with st.expander("Call settings", expanded=False):
