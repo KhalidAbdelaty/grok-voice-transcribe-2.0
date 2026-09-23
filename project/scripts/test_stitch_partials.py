@@ -8,6 +8,11 @@ every locked chunk is still present), and the final shows the server's
 stitched utterance.
 
     python project/scripts/test_stitch_partials.py
+
+The events file is not shipped; record it once (a real streaming run, about
+80 seconds, needs the fixtures and an API key):
+
+    python project/scripts/stt_stream_client.py project/audio/mixed/clean_master.wav 08_streaming_smartturn
 """
 import json
 import os
@@ -20,6 +25,10 @@ EVENTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))
 
 
 def main() -> int:
+    if not os.path.isfile(EVENTS):
+        print("SKIP: no recorded streaming events yet. Record them once with\n"
+              "  python project/scripts/stt_stream_client.py project/audio/mixed/clean_master.wav 08_streaming_smartturn")
+        return 0
     events = json.load(open(EVENTS, encoding="utf-8"))["events"]
     seen: list[dict] = []
     locked_so_far: list[str] = []

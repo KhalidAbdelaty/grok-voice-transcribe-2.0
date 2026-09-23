@@ -110,8 +110,10 @@ Offline tests, no API calls:
 
 ```bash
 python project/scripts/test_mic_input.py
-python project/scripts/test_stitch_partials.py
+python project/scripts/test_stitch_partials.py   # replays the events from the streaming run in the table above
 ```
+
+`test_stitch_partials.py` needs the events file from the "Streaming + Smart Turn" command in the table above; without it, the test skips and prints that command.
 
 ## Troubleshooting
 
