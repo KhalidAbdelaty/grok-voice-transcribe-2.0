@@ -25,11 +25,41 @@ you are on headphones.
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
 SAMPLE_RATE = 16000
 BLOCK_S = 0.02
+
+# PortAudio's WASAPI backend initialises COM on the thread that initialises
+# PortAudio (the first `import sounddevice`), and streams only open on that
+# thread while it lives. Streamlit runs every rerun on a new thread that then
+# exits, so after the first rerun every open failed with "Device unavailable
+# [PaErrorCode -9985]" although no program held the mic. All PortAudio work
+# runs on this one worker thread instead, which lives as long as the app.
+_PA = ThreadPoolExecutor(max_workers=1, thread_name_prefix="portaudio")
+_pa_thread: threading.Thread | None = None
+
+
+def _pa_init() -> None:
+    global _pa_thread
+    import sounddevice as sd
+
+    if _pa_thread is not None:  # two callers raced to initialise
+        return
+    sd._terminate()
+    sd._initialize()
+    _pa_thread = threading.current_thread()
+
+
+def _on_pa_thread(fn, *args):
+    """Run `fn` on the PortAudio thread (directly if already on it)."""
+    if _pa_thread is None:
+        _PA.submit(_pa_init).result()
+    if threading.current_thread() is _pa_thread:
+        return fn(*args)
+    return _PA.submit(fn, *args).result()
 
 # Every LocalAudio with open streams. Exclusive capture locks the mic: while
 # one is open, any other open of that mic fails with "Device unavailable
@@ -59,6 +89,10 @@ def list_devices() -> dict:
     """Input and output devices on the default host API (one entry per
     physical device instead of the same mic listed under MME, DirectSound
     and WASAPI), plus the system defaults."""
+    return _on_pa_thread(_list_devices)
+
+
+def _list_devices() -> dict:
     import sounddevice as sd
 
     devices = sd.query_devices()
@@ -218,6 +252,12 @@ class LocalAudio:
                 self.errors.append(f"output: {exc}")
 
     def start(self) -> None:
+        _on_pa_thread(self._start)
+
+    def stop(self) -> None:
+        _on_pa_thread(self._stop)
+
+    def _start(self) -> None:
         import sounddevice as sd
 
         with _active_lock:
@@ -248,7 +288,7 @@ class LocalAudio:
         except Exception:  # noqa: BLE001
             self.latency = 0.1
 
-    def stop(self) -> None:
+    def _stop(self) -> None:
         for stream in (self._in_stream, self._out_stream):
             if stream is not None:
                 try:
