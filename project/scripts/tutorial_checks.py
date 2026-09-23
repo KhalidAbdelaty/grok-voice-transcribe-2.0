@@ -55,22 +55,65 @@ def email_found(text: str, parts: tuple[str, ...] = ("khalid", "demo", "qivorasy
     return True, ""
 
 
-def spoken_email(text: str) -> str | None:
+def spoken_email(text: str, partial_ok: bool = False) -> str | None:
     """An email address in the transcript, written (a@b.com) or spoken
-    ("name dot x at domain dot com"), returned as written."""
+    ("name dot x at domain dot com"), returned as written.
+
+    Live callers don't say it as cleanly as the fixture does: fillers land in
+    the middle ("khalid dot demo at, uh, q i v o r a sync"), and the ending
+    can be left off or said later ("Khaled dot at Qivora Sync", then "Com"
+    as the next turn, call_20260923_053326). With `partial_ok` (the live
+    checks), an address with no ".com" still counts when the line talks
+    about an email, so "look at the app" never does. Without it (the fixture
+    report), the ending is required: interim text cut off mid-address
+    ("... at q i v") is not an address."""
     m = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", text)
     if m:
         return m.group(0)
-    dot = r"(?:\s*\.\s*|\s+dot\s+)"
-    m = re.search(rf"(\w+(?:{dot}\w+)*)\s+at\s+((?:[a-z] )*\w+(?:{dot}\w+)+)", text.lower())
+    low = re.sub(r"\b(?:" + "|".join(FILLERS) + r")\b", " ", text.lower())
+    low = re.sub(r"[,;:?!]", " ", low)
+    low = re.sub(r"\s+", " ", low).strip()
+    # In the name, Transcribe sometimes writes a spoken "dot" as a full stop
+    # ("Khalid. demo"); in the domain a full stop followed by a space ends
+    # the sentence instead ("... dot com. Could you ...").
+    name_dot = r"(?:\s*\.\s*|\s+dot\s+)"
+    domain_dot = r"(?:\s+dot\s+|\.(?=[a-z0-9]))"
+    word = r"(?!(?:and|my|is|the|a|to|so|at|dot)\b)[a-z0-9]+"
+    spelled = rf"(?:\b[a-z] )*\b{word}"  # "q i v o r a sync", "c h a l i d"
+    m = re.search(rf"({spelled}(?:{name_dot}{word})*)(?:\s+dot)?\s+at\s+({spelled}(?:\s+{word})?(?:{domain_dot}{word})*)", low)
     if not m:
         return None
+    name, domain = m.group(1), m.group(2)
+    if not re.search(domain_dot, domain):
+        if not partial_ok or "mail" not in low or len(domain.replace(" ", "")) < 4:
+            return None
 
-    def squash(s: str) -> str:
+    def squash(s: str, dot: str) -> str:
         s = re.sub(r"\b([a-z]) (?=[a-z]\b)", r"\1", s)  # "q i v o r a" -> "qivora"
         return re.sub(dot, ".", s).replace(" ", "")
 
-    return f"{squash(m.group(1))}@{squash(m.group(2))}"
+    return f"{squash(name, name_dot)}@{squash(domain, domain_dot)}"
+
+
+def number_read_out(texts: list[tuple[int, str]]) -> tuple[list[int], str] | None:
+    """A phone number the caller read out: seven or more digits in one turn,
+    or pieces over the next few turns (the agent asks for "the rest": "0 1 0.
+    2 5. 6." in one turn, "five five" two turns later). Returns the turns and
+    the digits heard, or None."""
+    runs = [(t, longest_digit_run(text)) for t, text in texts]
+    runs = [(t, d) for t, d in runs if len(d) >= 2]
+    for i, (t, d) in enumerate(runs):
+        if len(d) >= 7:
+            return [t], d
+        turns, digits = [t], d
+        for t2, d2 in runs[i + 1 : i + 3]:
+            if t2 - turns[-1] > 4:  # a caller turn, an agent reply, and back
+                break
+            turns.append(t2)
+            digits += d2
+            if len(digits) >= 7:
+                return turns, digits
+    return None
 
 
 def name_hits(text: str, name: str) -> int:
@@ -177,14 +220,41 @@ def summarize(snap: dict, settings, product_name: str) -> tuple[list[dict], list
                   else "flip the \u201cPhone line\u201d switch above the conversation"),
     ))
 
-    numbers = [(r["turn"], longest_digit_run(r["heard_by_transcribe"] or "")) for r in caller]
-    numbers = [(t, d) for t, d in numbers if len(d) >= 7]
-    emails = [(r["turn"], spoken_email(r["heard_by_transcribe"] or "")) for r in caller]
-    emails = [(t, e) for t, e in emails if e]
-    parts = [f"turn {t}: {d}" for t, d in numbers] + [f"turn {t}: {e}" for t, e in emails]
+    caller_texts = [(r["turn"], r["heard_by_transcribe"] or "") for r in caller]
+    number = number_read_out(caller_texts)
+    email = None
+    for i, (t, text) in enumerate(caller_texts):
+        # The ending can come as the caller's next turn ("... at Qivora Sync" / "Com").
+        nxt = caller_texts[i + 1][1] if i + 1 < len(caller_texts) else ""
+        found = spoken_email(text, partial_ok=True)
+        if found and "." not in found.split("@")[1] and re.match(r"\s*(?:dot\s+)?com\b", nxt, re.I):
+            found += ".com"
+        if found:
+            email = (t, found)
+            break
+    parts = []
+    if number:
+        parts.append(f"turn{'s' if len(number[0]) > 1 else ''} {'+'.join(map(str, number[0]))}: {number[1]}")
+    if email:
+        parts.append(f"turn {email[0]}: {email[1]}")
+    # What the agent read back, as Transcribe heard it in the agent's voice.
+    readback = []
+    for r in record:
+        if r["speaker"] == "khalid":
+            continue
+        heard = r["heard_by_transcribe"] or ""
+        if number and not any("number" in p for p in readback) and len(longest_digit_run(heard)) >= 7:
+            readback.append(f"number {longest_digit_run(heard)} (turn {r['turn']})")
+        if email and not any("email" in p for p in readback) and spoken_email(heard, partial_ok=True):
+            readback.append(f"email {spoken_email(heard, partial_ok=True)} (turn {r['turn']})")
+    evidence = "; ".join(parts) if parts else "read a phone number or an email address to the agent"
+    if readback:
+        evidence += "; read back as " + ", ".join(readback)
     features.append(dict(
-        feature="Phone number / email read out loud", status="seen" if parts else "not yet",
-        evidence="; ".join(parts) if parts else "read a phone number or an email address to the agent",
+        feature="Phone number / email read out loud",
+        status="seen" if parts else "not yet",
+        evidence=evidence + ("" if not parts or (number and email) else
+                             f"; {'an email address' if number else 'a phone number'} not heard yet"),
     ))
 
     fillers = [t for r in caller for t in tokens(r["heard_by_transcribe"] or "") if t in FILLERS]
