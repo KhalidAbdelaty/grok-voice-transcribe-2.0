@@ -93,22 +93,50 @@ def summarize(snap: dict, settings, product_name: str) -> tuple[list[dict], list
     caller = [r for r in record if r["speaker"] == "khalid"]
     features: list[dict] = []
 
-    ids: dict[str, dict[int, int]] = {}
+    # Speaker ids restart in every Transcribe session (a phone line switch or
+    # a reconnect opens a new one), so they are only compared within one:
+    # pooled, the phone leg's "0" for everyone read as Maya and Nadia each
+    # having several ids (call_20260923_051305).
+    sessions: dict[int, dict[str, dict[int, int]]] = {}
+    phone_sessions: set[int] = set()
     for r in record:
+        sess = r.get("session", 1)
+        if r.get("source") == "phone":
+            phone_sessions.add(sess)
         for i in r.get("diarized_speaker_ids") or []:
-            ids.setdefault(r["speaker"], {}).setdefault(i, 0)
-            ids[r["speaker"]][i] += 1
+            counts = sessions.setdefault(sess, {}).setdefault(r["speaker"], {})
+            counts[i] = counts.get(i, 0) + 1
+
+    def labels(sess: int) -> tuple[str, bool]:
+        """'You -> 0, Maya -> 1' for one session, and whether every speaker
+        heard in it got an id of their own."""
+        main = {s: max(c, key=c.get) for s, c in sessions[sess].items()}
+        text = ", ".join(f"{SPEAKER_LABELS.get(s, s)} \u2192 {i}" for s, i in main.items())
+        return text, len(set(main.values())) == len(main)
+
+    clean = [s for s in sorted(sessions) if s not in phone_sessions]
+    phone = [s for s in sorted(sessions) if s in phone_sessions]
+    multi = len(sessions) > 1
+
+    def name(sess: int) -> str:
+        return f"session {sess}: " if multi else ""
+
     if not settings.diarize:
         features.append(dict(feature="Multiple voices, each labeled", status="off", evidence="diarize is off in Call settings"))
-    elif ids:
-        main = {s: max(c, key=c.get) for s, c in ids.items()}
-        distinct = len(set(main.values())) == len(main)
-        mixed = [SPEAKER_LABELS.get(s, s) for s, c in ids.items() if len(c) > 1]
-        evidence = ", ".join(f"{SPEAKER_LABELS.get(s, s)} \u2192 speaker {i}" for s, i in main.items())
-        if mixed:
-            evidence += f" (more than one id heard for {', '.join(mixed)})"
-        features.append(dict(feature="Multiple voices, each labeled", status="seen" if distinct and len(main) >= 2 else "partly",
+    elif clean:
+        judged = [(s, *labels(s)) for s in clean]
+        voices = {sp for s in clean for sp in sessions[s]}
+        clashes = [s for s, _, ok in judged if not ok]
+        evidence = " \u00b7 ".join(f"{name(s)}{text}" for s, text, _ in judged)
+        if clashes:
+            evidence += f" (two voices share an id in session {', '.join(map(str, clashes))})" if multi \
+                else " (two voices share an id)"
+        features.append(dict(feature="Multiple voices, each labeled",
+                             status="seen" if len(voices) >= 2 and not clashes else ("partly" if clashes else "not yet"),
                              evidence=evidence))
+    elif phone:
+        features.append(dict(feature="Multiple voices, each labeled", status="not yet",
+                             evidence="only phone-line turns so far; see the phone row for how the 8 kHz leg was diarized"))
     else:
         features.append(dict(feature="Multiple voices, each labeled", status="not yet", evidence="no diarized turns yet"))
 
@@ -136,10 +164,16 @@ def summarize(snap: dict, settings, product_name: str) -> tuple[list[dict], list
     ))
 
     line = snap.get("phone_line")
+    phone_ids = []
+    for s in phone:
+        text, ok = labels(s)
+        phone_ids.append(f"{name(s)}{text}" + ("" if ok else " (voices merged)"))
+    phone_note = "; diarization on the 8 kHz leg: " + " \u00b7 ".join(phone_ids) if phone_ids and settings.diarize else ""
     features.append(dict(
-        feature="Flaky, phone-like audio", status="on" if line else "off",
+        feature="Flaky, phone-like audio", status="on" if line else ("seen" if phone else "off"),
         evidence=(f"Transcribe streams encoding=mulaw&sample_rate=8000 for every voice; your mic lost "
-                  f"{line['dropout_pct']}% of {line['packets']} packets" if line
+                  f"{line['dropout_pct']}% of {line['packets']} packets{phone_note}" if line
+                  else f"used earlier in this call{phone_note}" if phone
                   else "flip the \u201cPhone line\u201d switch above the conversation"),
     ))
 

@@ -38,6 +38,8 @@ from typing import Iterator
 
 import requests
 
+from scripts.tutorial_checks import longest_digit_run
+
 RESPONSES_URL = "https://api.x.ai/v1/responses"
 FAST_MODEL = "grok-4.20-0309-non-reasoning"
 REASONING_MODEL = "grok-4.7"
@@ -67,10 +69,22 @@ Rules:
   before Maya has handed over to her.
 - This is spoken audio: one to three short sentences, no lists, no markdown,
   no emoji, no stage directions.
-- Reply in the language named on the last line of the prompt: English, or
-  Egyptian Arabic (colloquial Egyptian, in Arabic script). Set `language` to
-  "en" or "ar-EG" to match. Keep the product name "Qivora Sync", numbers and
-  email addresses as they are.
+- Always reply in English, set `language` to "en", even when the caller
+  speaks or mixes in Arabic: understand the Arabic and answer it in English.
+  Never ask the caller to switch to English; if the Arabic is unclear, ask
+  about the problem itself. Keep the product name "Qivora Sync" as it is.
+- When the caller gives a phone number or email, read it back once so they
+  can confirm it.
+- Reading back a phone number: a caller line may end with a note like
+  "[digits heard: 01455502 (8 digits)]". Use exactly those digits, in order,
+  never adding, dropping or repeating one, written digit by digit in spaced
+  groups ("0 1 4 5, 5 5 0 2"). Only treat the number as incomplete if the
+  caller says so.
+- Reading back an email address: keep every part the caller said, in order,
+  including parts after a dot ("jane dot doe"), and write it the way it is
+  spoken ("jane dot doe at example dot com"), never as an @ address and
+  never letter by letter unless the caller spelled it. If a part sounds
+  unclear, read your best guess back and ask the caller to confirm it.
 - The transcript you see comes from speech recognition and may contain small
   errors; go with the most plausible meaning instead of asking about typos.
 - A line marked "(interrupted)" was cut off by the caller mid-sentence; the
@@ -83,7 +97,7 @@ Rules:
 # Property order matters for streaming: `speaker` and `language` arrive first
 # so the voice (and its TTS language) can be chosen before any text, `text`
 # last so it can be spoken as it grows.
-LANGUAGES = ("en", "ar-EG")
+LANGUAGES = ("en",)
 REPLY_SCHEMA = {
     "type": "object",
     "properties": {
@@ -123,7 +137,7 @@ class _PartialJsonReader:
     JSON object that is still arriving token by token."""
 
     _SPEAKER = re.compile(r'"speaker"\s*:\s*"(maya|nadia)"')
-    _LANGUAGE = re.compile(r'"language"\s*:\s*"(en|ar-EG)"')
+    _LANGUAGE = re.compile(r'"language"\s*:\s*"(en)"')
     _END = re.compile(r'"end_call"\s*:\s*(true|false)')
     _TEXT = re.compile(r'"text"\s*:\s*"')
     _ESCAPES = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
@@ -364,13 +378,12 @@ class AgentBrain:
         turns = list(self.history)
         if pending_caller is not None:
             turns.append(("khalid", pending_caller.strip() or "(inaudible)"))
-        lines = [f"{NAMES[s]}: {t}" for s, t in turns]
+        lines = [f"{NAMES[s]}: {t}{_digit_note(t) if s == 'khalid' else ''}" for s, t in turns]
         transcript = "\n".join(lines) if lines else "(the call just connected)"
-        last_caller = next((t for s, t in reversed(turns) if s == "khalid"), "")
         return (
             "Conversation so far:\n"
             f"{transcript}\n\n"
-            f"Write the next agent turn, in {'Egyptian Arabic (language ar-EG)' if reply_language(last_caller) == 'ar-EG' else 'English (language en)'}."
+            "Write the next agent turn, in English (language en)."
         )
 
     def _request_body(self, pending_caller: str | None) -> dict:
@@ -422,17 +435,12 @@ class AgentBrain:
         return stream.reply
 
 
-_ARABIC_WORD = re.compile(r"[\u0600-\u06FF]+")
-_LATIN_WORD = re.compile(r"[A-Za-z]{2,}")
-
-
-def reply_language(caller_text: str) -> str:
-    """The language to answer in, decided in code from the caller's last turn
-    (the model alone kept answering in Arabic once it had started): Egyptian
-    Arabic when most of its words are Arabic, English otherwise."""
-    arabic = len(_ARABIC_WORD.findall(caller_text))
-    latin = len(_LATIN_WORD.findall(caller_text))
-    return "ar-EG" if arabic > latin else "en"
+def _digit_note(caller_text: str) -> str:
+    """The digits in a caller line, counted in code. Transcribe writes a
+    dictated number as "0 1 4 5. 5 5 0 2.", and the model read that back as
+    "01455" and then "014555502" (call_20260923_051305)."""
+    digits = longest_digit_run(caller_text)
+    return f" [digits heard: {digits} ({len(digits)} digits)]" if len(digits) >= 4 else ""
 
 
 def _output_text(payload: dict) -> str:

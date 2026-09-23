@@ -191,10 +191,16 @@ def print_report(engine: CallEngine) -> None:
             f"interrupted={r['interrupted']}, speaker ids={r['diarized_speaker_ids']}"
         )
     print(f"\nstreamed audio: {snap['audio_seconds']:.1f}s, phase at end: {snap['phase']}, error: {snap['error']}")
-    agent_ids = {i for r in snap["record"] if r["speaker"] != "khalid" for i in r["diarized_speaker_ids"]}
+    # Speaker ids restart with every Transcribe session (a phone line switch
+    # opens a new one), so only compare ids within the same session.
+    agent_ids: dict[int, set[int]] = {}
+    for r in snap["record"]:
+        if r["speaker"] != "khalid":
+            agent_ids.setdefault(r.get("session", 1), set()).update(r["diarized_speaker_ids"])
     phantoms = [
         r for r in snap["record"]
-        if r["speaker"] == "khalid" and r["diarized_speaker_ids"] and set(r["diarized_speaker_ids"]) <= agent_ids
+        if r["speaker"] == "khalid" and r["diarized_speaker_ids"]
+        and set(r["diarized_speaker_ids"]) <= agent_ids.get(r.get("session", 1), set())
     ]
     ignored = snap.get("phantoms_ignored") or []
     print(f"caller turns diarized only as an agent voice (phantoms): {len(phantoms)}"
@@ -349,7 +355,8 @@ def run_phantom() -> None:
 
 
 def run_arabic() -> None:
-    """The caller speaks Egyptian Arabic; the agent should answer in it."""
+    """The caller speaks Egyptian Arabic; the agent should understand it and
+    answer in English (the agents always reply in English)."""
     engine, mic = make_engine(FAST_MODEL, True)
     try:
         wait_for(lambda: phase(engine) == "listening", 30, "listening")
@@ -368,7 +375,7 @@ def run_arabic() -> None:
         last = agents[-1] if len(agents) >= 2 else None
         arabic = bool(last) and any("\u0600" <= ch <= "\u06ff" for ch in (last["heard_by_transcribe"] or ""))
         print(f"\nreply language={last['reply_language'] if last else None}, Arabic script in what was heard={arabic}")
-        print("ARABIC", "PASS" if last and last["reply_language"] == "ar-EG" and arabic else "FAIL")
+        print("ARABIC", "PASS" if last and last["reply_language"] == "en" and not arabic else "FAIL")
         engine.end()
 
 

@@ -57,7 +57,12 @@ QLOG = logging.getLogger("qivora")
 
 SPECULATE_AFTER_SILENCE_S = 0.25
 MAX_SPECULATIONS = 4  # per caller turn; each discarded guess costs one short model call
-SILENCE_WATCHDOG_S = 6.0
+# Our own end of turn, when the server's Smart Turn never closes it: once the
+# mic has been quiet for smart_turn_timeout plus this margin. On the 8 kHz
+# phone leg the server's timeout did not fire at all (call_20260923_051305:
+# 4 of 6 phone turns closed only by the old fixed 6 s watchdog, and the
+# caller spoke up into the silence and cut the late reply).
+SILENCE_WATCHDOG_MARGIN_S = 0.5
 BARGE_MIN_PLAYBACK_S = 0.4
 # Voice barge-in (see _step_barge_in).
 STRONG_CANDIDATE_S = 0.15  # a short "Wait." is ~0.28 s of loud frames spread over 0.6 s
@@ -390,8 +395,13 @@ class CallEngine:
         self._unowned_seen = 0
         self.playback = playback or NullPlayback()
         self.brain = brain or AgentBrain(model=settings.model, priority=settings.priority)
-        self.tts = TtsStreamer([voices["maya"], voices["nadia"]], language=settings.language)
+        # The agents always answer in English, so no Arabic sockets up front.
+        self.tts = TtsStreamer([voices["maya"], voices["nadia"]], language=settings.language, preopen=())
         self.session: LiveCallSession | None = None
+        # Which Transcribe session a turn came from: speaker ids restart in
+        # each one (phone line switch, reconnect), so they are only comparable
+        # within a session.
+        self.session_no = 0
         self.lock = threading.RLock()
 
         self.phase = "connecting"
@@ -529,6 +539,7 @@ class CallEngine:
         self.agent_speaker_ids.clear()
         self.caller_speaker_ids.clear()
         self.session = swap["session"]
+        self.session_no += 1
         self.listener = swap["listener"]
         self.log.write("phone_line", on=on, wire=self.session.wire)
         self._add_system("phone line on - Transcribe now hears the call as 8 kHz \u03bc-law" if on
@@ -545,6 +556,7 @@ class CallEngine:
         session.connect()
         with self.lock:
             self.session = session
+            self.session_no += 1
             self.phase = "waiting_mic"
         QLOG.info("call   started  path=%s  %s  brain=%s", self.settings.audio_path,
                   self.describe or "", self.brain.model.replace("-0309", ""))
@@ -584,6 +596,7 @@ class CallEngine:
             self.agent_speaker_ids.clear()
             self.caller_speaker_ids.clear()
             self.session = session
+            self.session_no += 1
             self.error = None
             self.phase = "waiting_mic"
             self._add_system("reconnected - the transcript so far is kept")
@@ -729,6 +742,13 @@ class CallEngine:
         recent audio (`heard_over_echo`). Needs both, so a real caller who
         happens to be mis-diarized is never dropped."""
         ids = set(result.speaker_ids)
+        text = _norm(result.final_text)
+        keyterm_only = bool(text) and text in {_norm(k) for k in self.keyterms}
+        if keyterm_only and not ids:
+            # Nothing but the keyterm, on no diarized voice at all: the bias
+            # filling in near-silence (turn 1 of call_20260923_051305 opened
+            # the caller's first bubble with a "Qivora Sync" nobody said).
+            return True
         agent_voice = bool(ids) and ids <= self.agent_speaker_ids and not ids & self.caller_speaker_ids
         if not agent_voice:
             return False
@@ -737,8 +757,7 @@ class CallEngine:
         # Even with the caller audible around it: a turn that is nothing but
         # the keyterm, in an agent's voice, is the keyterm bias filling in a
         # fragment (entries 17 and 18), not the caller.
-        text = _norm(result.final_text)
-        if text and text in {_norm(k) for k in self.keyterms}:
+        if keyterm_only:
             return True
         # ...or nothing but words from the agent's own last line ("Email
         # address?" right after "...your full email address?").
@@ -920,7 +939,7 @@ class CallEngine:
             mic.heard_speech
             and not live.done
             and not self.watchdog_fired
-            and mic.silence_s() > SILENCE_WATCHDOG_S
+            and mic.silence_s() > self.settings.smart_turn_timeout / 1000 + SILENCE_WATCHDOG_MARGIN_S
         ):
             self.session.end_live_turn()
             self.watchdog_fired = True
@@ -1446,6 +1465,7 @@ class CallEngine:
             "model": stream.model if stream else None,
             "reply_language": job.language if job else None,
             "source": source,
+            "session": self.session_no,
             "service_tier": stream.service_tier if stream else None,
             "tts_rest_fallback": job.used_rest_fallback if job else None,
             "barge_pauses": self.pause_count if job else None,

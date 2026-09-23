@@ -139,11 +139,18 @@ def stitch_parts(events: list[dict[str, Any]]) -> tuple[str, str, str]:
     for evt in reversed(events):
         if evt.get("type") == "transcript.partial":
             if not evt.get("is_final") and not evt.get("speech_final"):
-                current = (evt.get("text") or "").strip()
+                current = _event_text(evt)
             break
     if current and text.endswith(current):
         return text[: len(text) - len(current)].rstrip(), current, tag
     return "", text, tag
+
+
+def _event_text(evt: dict[str, Any]) -> str:
+    """An event's text without the leading punctuation the server sometimes
+    carries over from the previous utterance (", okay, uh" or "? Sorry",
+    call_20260923_051305)."""
+    return (evt.get("text") or "").strip().lstrip(",.;:!?،؟ ").strip()
 
 
 def stitch_partials(events: list[dict[str, Any]]) -> tuple[str, str]:
@@ -167,7 +174,7 @@ def stitch_partials(events: list[dict[str, Any]]) -> tuple[str, str]:
     for evt in events:
         if evt.get("type") != "transcript.partial":
             continue
-        text = (evt.get("text") or "").strip()
+        text = _event_text(evt)
         if evt.get("speech_final"):
             utterance = text or " ".join([*locked, current]).strip()
             if utterance:

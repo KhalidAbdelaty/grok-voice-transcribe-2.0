@@ -19,12 +19,34 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from scripts.live_call_session import stitch_partials  # noqa: E402
+from scripts.live_call_session import _event_text, stitch_partials  # noqa: E402
 
 EVENTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results", "08_streaming_smartturn_events.json")
 
 
+def check_leading_punctuation() -> int:
+    """The server can open an utterance with the previous one's closing mark
+    (call_20260923_051305: ", okay, uh, 0 1 4 5." and "? Sorry about that")."""
+    cases = [
+        ([{"type": "transcript.partial", "text": ", okay, uh, 0 1 4 5.", "is_final": True, "speech_final": True}],
+         "okay, uh, 0 1 4 5."),
+        ([{"type": "transcript.partial", "text": "? Sorry about that", "is_final": False}], "Sorry about that"),
+        ([{"type": "transcript.partial", "text": "؟ طيب", "is_final": True, "speech_final": True}],
+         "طيب"),
+    ]
+    failures = 0
+    for events, want in cases:
+        got = stitch_partials(events)[0]
+        if got != want:
+            failures += 1
+            print(f"FAIL leading punctuation: {ascii(got)} != {ascii(want)}")
+    return failures
+
+
 def main() -> int:
+    if check_leading_punctuation():
+        print("FAIL")
+        return 1
     if not os.path.isfile(EVENTS):
         print("SKIP: no recorded streaming events yet. Record them once with\n"
               "  python project/scripts/stt_stream_client.py project/audio/mixed/clean_master.wav 08_streaming_smartturn")
@@ -41,13 +63,13 @@ def main() -> int:
         if evt.get("speech_final"):
             # The display now keeps every finished utterance of the turn, so
             # it must end with the server's stitched utterance.
-            if not text.endswith((evt.get("text") or "").strip()):
+            if not text.endswith(_event_text(evt)):
                 failures += 1
                 print(f"FAIL t={evt['t']}: final text does not end with the server's stitched utterance")
             locked_so_far = []
             continue
         if evt.get("is_final"):
-            locked_so_far.append((evt.get("text") or "").strip())
+            locked_so_far.append(_event_text(evt))
         for chunk in locked_so_far:
             if chunk and chunk not in text:
                 failures += 1

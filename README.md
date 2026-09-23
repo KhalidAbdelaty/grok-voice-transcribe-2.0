@@ -84,7 +84,7 @@ Open `http://localhost:8501`, pick an audio path, and press **Start call**. Say 
   - **This computer**: opens the mic and speakers you choose directly from Python. Use this if the browser path doesn't hear you.
 - **Use headphones.** Open speakers feed Maya's voice back into the mic. The app filters its own voice out of your turns and measures how much leaks in (Mic diagnostics shows it), but headphones make interruptions and turn-taking far cleaner.
 - **Turn-taking:** no buttons. Smart Turn ends your turn when you finish a thought (threshold 0.8 by default, in Call settings). Talk over an agent and she stops to listen; "mm-hmm" or a cough won't cut her off.
-- **Arabic:** switch to Egyptian Arabic and the agents answer in it.
+- **Arabic:** switch to Egyptian Arabic mid-call. Transcribe keeps it in Arabic script; the agents understand it and still answer in English.
 - **Phone line:** flip the "Phone line · 8 kHz μ-law" switch during the call. At your next pause, the app reopens Transcribe on `encoding=mulaw&sample_rate=8000`, your mic starts losing ~3% of its packets, and you hear the agents narrowband. Every bubble is labeled `PHONE · 8 kHz` or `MIC · 16 kHz` by what Transcribe actually received.
 - **Tutorial checks tab:** ticks off the article's features as they happen in your call: speaker ids, keyterm hits, end-of-turn confidence per turn, language switch, digits and emails, fillers.
 
@@ -99,7 +99,7 @@ python project/scripts/validate_engine.py latency          # time from "caller s
 python project/scripts/validate_engine.py barge-in --path local --echo 0.02 --caller-volume 0.3
 python project/scripts/validate_engine.py backchannel      # "Yeah." under Maya must not cut her off
 python project/scripts/validate_engine.py phantom --path local --echo 0.02   # agent echo must not become your turn
-python project/scripts/validate_engine.py arabic           # reply comes back in Egyptian Arabic
+python project/scripts/validate_engine.py arabic           # an Arabic line gets an English reply
 python project/scripts/validate_engine.py toggle           # phone line on and off mid-call
 python project/scripts/validate_engine.py latency --phone  # a whole call over the mu-law wire
 ```
