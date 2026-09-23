@@ -66,6 +66,7 @@ def main() -> int:
             if not text.endswith(_event_text(evt)):
                 failures += 1
                 print(f"FAIL t={evt['t']}: final text does not end with the server's stitched utterance")
+            print(f"{evt['t']:7.2f} final   {len(text):4d} chars  ...{ascii(text[-70:])}")
             locked_so_far = []
             continue
         if evt.get("is_final"):
